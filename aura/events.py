@@ -80,6 +80,13 @@ class ScreenAnnotationEvent(BaseEvent):
     patch_path: str = ""               # cropped PNG of the annotation
 
 
+class ScreenStateEvent(BaseEvent):
+    """Off-deck screen content explained by the VLM (live demo, video,
+    whiteboard...) when slide matching can't account for the screen."""
+    kind: str = "other"
+    summary: str = ""
+
+
 class SlideChange(BaseEvent):
     slide: int
     title: str = ""
@@ -104,6 +111,6 @@ EVENT_TYPES = {
     for cls in (
         AttentionEvent, TranscriptSegment, PauseDetected,
         InteractionEvent, SlideChange, ScreenAnnotationEvent,
-        SessionEnd, AgentAction,
+        ScreenStateEvent, SessionEnd, AgentAction,
     )
 }

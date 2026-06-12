@@ -69,3 +69,15 @@ def test_pptb_generation(tmp_path):
     assert "What matters for you, as a team" in texts[3]
     assert "Why slide two?" in texts[3], "unresolved question in synthesis"
     assert "slide 2" in texts[3], "dip slide named in synthesis"
+
+
+def test_chat_pane_grouping():
+    """OCR lines from one sample -> one message with sender attribution."""
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from scripts.ingest_raw import ChatPaneReader
+    r = ChatPaneReader.__new__(ChatPaneReader)   # skip tesseract check
+    msgs = r._group(["Anna", "Where is the data", "stored exactly?"])
+    assert msgs == [("Anna", "Where is the data stored exactly?")]
+    msgs = r._group(["| do not understand this part?"])
+    assert msgs == [("chat", "I do not understand this part?")]
+    assert r._group([]) == []

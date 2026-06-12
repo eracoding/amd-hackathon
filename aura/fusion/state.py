@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 
 from ..bus import EventBus
 from ..events import (
-    AttentionEvent, InteractionEvent, ScreenAnnotationEvent, SlideChange,
-    TranscriptSegment,
+    AttentionEvent, InteractionEvent, ScreenAnnotationEvent,
+    ScreenStateEvent, SlideChange, TranscriptSegment,
 )
 
 TACTICAL_S = 10.0
@@ -39,6 +39,7 @@ class RoomState:
     pending_questions: list[dict]
     recent_reactions: int
     recent_annotations: int
+    screen_state: dict | None = None   # off-deck content (VLM-explained)
     annotations: dict = field(default_factory=dict)  # agent blackboard
 
     def to_llm_json(self) -> dict:
@@ -63,6 +64,7 @@ class RoomState:
             ],
             "reactions_recent": self.recent_reactions,
             "annotations_recent": self.recent_annotations,
+            "off_deck_screen": self.screen_state,
             "notes": self.annotations,
         }
 
@@ -77,6 +79,7 @@ class RoomStateBuilder:
         self._questions: list[dict] = []      # unresolved
         self._slide, self._slide_title = 0, ""
         self._slide_content = ""
+        self._screen_state: dict | None = None
         self._eng_history: deque[tuple[float, float]] = deque(maxlen=240)
         # per-slide analytics (feeds the Summarizer & debrief)
         self._slide_acc: dict[int, dict] = {}
@@ -86,6 +89,7 @@ class RoomStateBuilder:
         bus.subscribe(InteractionEvent, self._on_interaction)
         bus.subscribe(SlideChange, self._on_slide)
         bus.subscribe(ScreenAnnotationEvent, self._on_annotation)
+        bus.subscribe(ScreenStateEvent, self._on_screen_state)
 
     # ------------------------------------------------------------ handlers
     async def _on_attn(self, e: AttentionEvent) -> None:
@@ -121,7 +125,11 @@ class RoomStateBuilder:
                       "questions": 0, "min": 1.0})
         acc["annotations"] = acc.get("annotations", 0) + 1
 
+    async def _on_screen_state(self, e: ScreenStateEvent) -> None:
+        self._screen_state = {"kind": e.kind, "summary": e.summary}
+
     async def _on_slide(self, e: SlideChange) -> None:
+        self._screen_state = None      # back on the deck
         self._slide, self._slide_title = e.slide, e.title
         self._slide_content = e.content
         self._slide_acc.setdefault(
@@ -198,4 +206,5 @@ class RoomStateBuilder:
             pending_questions=list(self._questions),
             recent_reactions=len(self._reactions),
             recent_annotations=len(self._annotations),
+            screen_state=self._screen_state,
         )

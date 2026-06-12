@@ -172,9 +172,14 @@ async def main() -> None:
     if "audio" in streams and (rec / streams["audio"]["path"]).exists():
         device = args.whisper_device
         if device == "auto":
+            # faster-whisper runs on CTranslate2, which has NO ROCm backend.
+            # On AMD GPUs torch reports cuda=True (ROCm masquerades), but
+            # passing "cuda" to CTranslate2 would crash -> force CPU there.
             try:
                 import torch
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                is_rocm = getattr(torch.version, "hip", None) is not None
+                device = "cuda" if (torch.cuda.is_available()
+                                    and not is_rocm) else "cpu"
             except ImportError:
                 device = "cpu"
         events += ingest_audio(rec / streams["audio"]["path"],

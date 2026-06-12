@@ -11,3 +11,13 @@ python -m vllm.entrypoints.openai.api_server \
   --max-model-len 8192 \
   --gpu-memory-utilization 0.85 \
   --port 8000
+
+# Optional second instance for Tier-2 screen understanding (run in another
+# terminal; MI300X fits both models):
+#   AURA_VLM=1 bash scripts/serve_llm.sh
+if [ "${AURA_VLM:-0}" = "1" ]; then
+  exec python -m vllm.entrypoints.openai.api_server \
+    --model "${AURA_VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}" \
+    --dtype bfloat16 --max-model-len 8192 \
+    --gpu-memory-utilization 0.35 --port 8001
+fi

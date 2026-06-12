@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from ..bus import EventBus
-from ..events import ScreenAnnotationEvent, SlideChange
+from ..events import ScreenAnnotationEvent, ScreenStateEvent, SlideChange
 
 log = logging.getLogger("aura.slides")
 
@@ -174,7 +174,8 @@ class ScreenSlideTracker:
 
     async def observe(self, img, ts: float | None = None) -> SlideChange | None:
         """Feed one frame; returns the SlideChange if one was emitted."""
-        page, _d = self.deck.match(img)
+        page, sim = self.deck.match(img)
+        self.last_similarity = sim
         if page is None or page == self.current:
             self._pending = (None, 0)
             return None
@@ -274,8 +275,10 @@ class ScreenObserver(ScreenSlideTracker):
 
     def __init__(self, bus: EventBus, deck: DeckIndex,
                  capture_fn=None, period_s: float = 0.5,
-                 patch_dir: str | Path = "sessions/annotations") -> None:
+                 patch_dir: str | Path = "sessions/annotations",
+                 vlm=None) -> None:
         super().__init__(bus, deck, capture_fn=capture_fn, period_s=period_s)
+        self.vlm = vlm                 # optional ScreenVLM (Tier-2)
         self.patch_dir = Path(patch_dir)
         self.patch_dir.mkdir(parents=True, exist_ok=True)
         self._refs: dict[int, "np.ndarray"] = {}        # page -> gray ref
@@ -303,8 +306,18 @@ class ScreenObserver(ScreenSlideTracker):
 
     # ------------------------------------------------------------- observe
     async def observe(self, img, ts: float | None = None):
-        """Slide tracking (parent) + annotation diffing on the current page."""
+        """Slide tracking (parent) + annotation diffing on the current page
+        + VLM escalation when the screen shows something off-deck."""
         event = await super().observe(img, ts=ts)
+        if self.vlm is not None and self.vlm.note_match(self.last_similarity):
+            out = await self.vlm.classify_screen(img)
+            if out:
+                se = ScreenStateEvent(kind=out.get("kind", "other"),
+                                      summary=out.get("summary", ""),
+                                      source="screen")
+                if ts is not None:
+                    se.ts = ts
+                await self.bus.publish(se)
         if self.current is not None:
             await self._detect_annotations(img, ts=ts)
         return event
@@ -372,11 +385,16 @@ class ScreenObserver(ScreenSlideTracker):
             emitted_boxes.append((x0, y0, x1, y1))
             bbox = [x0 / w, y0 / h, x1 / w, y1 / h]
             patch = self._save_patch(content, bbox)
+            text, intent = "", ""
+            if self.vlm is not None:
+                read = await self.vlm.read_annotation(Image.open(patch))
+                text, intent = read.get("text", ""), read.get("intent", "")
             e = ScreenAnnotationEvent(
                 slide=page, bbox=[round(v, 4) for v in bbox],
                 area_frac=round(area / (w * h), 5),
-                kind="typed" if bw > 3.5 * bh and bh < h * 0.06 else "drawn",
-                patch_path=patch, source="screen")
+                kind=intent or ("typed" if bw > 3.5 * bh and bh < h * 0.06
+                                else "drawn"),
+                text=text, patch_path=patch, source="screen")
             if ts is not None:
                 e.ts = ts
             await self.bus.publish(e)

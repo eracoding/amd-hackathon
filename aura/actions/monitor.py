@@ -19,8 +19,8 @@ import time
 
 from ..bus import EventBus
 from ..events import (
-    AgentAction, InteractionEvent, PauseDetected,
-    ScreenAnnotationEvent, SessionEnd, TranscriptSegment,
+    AgentAction, InteractionEvent, PauseDetected, ScreenAnnotationEvent,
+    ScreenStateEvent, SessionEnd, TranscriptSegment,
 )
 from ..fusion.state import RoomStateBuilder
 
@@ -159,6 +159,7 @@ class RoomMonitor:
         bus.subscribe(AgentAction, self._on_action)
         bus.subscribe(InteractionEvent, self._on_interaction)
         bus.subscribe(ScreenAnnotationEvent, self._on_annotation)
+        bus.subscribe(ScreenStateEvent, self._on_screen_state)
         bus.subscribe(TranscriptSegment, self._on_speech)
         bus.subscribe(PauseDetected, self._on_pause)
         bus.subscribe(SessionEnd, self._on_end)
@@ -207,6 +208,10 @@ class RoomMonitor:
         await self._log("annotation",
                         f"someone {what} on slide {e.slide}"
                         + (f": “{e.text}”" if e.text else ""), e.ts)
+
+    async def _on_screen_state(self, e: ScreenStateEvent) -> None:
+        await self._log("annotation",
+                        f"screen shows {e.kind}: {e.summary}", e.ts)
 
     async def _on_speech(self, _e: TranscriptSegment) -> None:
         pass  # transcript reaches the right pane via state pushes
