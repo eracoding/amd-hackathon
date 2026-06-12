@@ -28,9 +28,11 @@ note the time INSIDE each file where it happens (mm:ss or seconds), and pass
 window is 10 s, so ±1 s of eyeballing is fine. Omit --sync to assume all
 files started simultaneously.
 
-REGIONS are fractions of the frame: "x0,y0,x1,y1". Find them by opening one
-screenshot of the recording and estimating where the slide ends and the chat
-pane begins. Omit --slide-region to use the whole frame.
+REGIONS are fractions of the frame: "x0,y0,x1,y1". With --vlm you can OMIT
+them entirely: one VLM call locates the slide area and chat panel
+automatically (explicit arguments always override). Without --vlm, omit
+--slide-region to use the whole frame, and find regions by opening one
+screenshot and estimating the boundaries.
 """
 from __future__ import annotations
 
@@ -112,6 +114,10 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
         vlm = ScreenVLM()
     obs = ScreenObserver(bus, deck, capture_fn=lambda: None,
                          patch_dir=out_dir / "annotations", vlm=vlm)
+    if vlm is not None and slide_region is None:
+        # one VLM call replaces manual region measurement
+        slide_region, chat_region = await _auto_regions(
+            path, vlm, chat_region)
     collected: list[dict] = []
 
     async def collect(e):
@@ -120,7 +126,7 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
     bus.subscribe("SlideChange", collect)
     bus.subscribe("ScreenStateEvent", collect)
 
-    chat = ChatPaneReader() if chat_region else None
+    chat = ChatPaneReader(vlm=vlm) if chat_region else None
     cap = cv2.VideoCapture(str(path))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(round(src_fps * sample_s)))
@@ -136,8 +142,11 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
             await obs.observe(crop_frac(img, slide_region), ts=ts)
             obs_slide = obs.current or 0
             if chat and idx % chat_step == 0:
-                for person, line in chat.new_messages(
-                        crop_frac(img, chat_region)):
+                pane = crop_frac(img, chat_region)
+                msgs = (await chat.new_messages_vlm(pane)
+                        if chat.vlm is not None
+                        else chat.new_messages(pane))
+                for person, line in msgs:
                     kind = (InteractionKind.question if "?" in line
                             else InteractionKind.comment)
                     e = InteractionEvent(person_id=person, kind=kind,
@@ -157,24 +166,48 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
     return collected
 
 
-class ChatPaneReader:
-    """OCRs the Teams chat pane; yields lines not seen before."""
+async def _auto_regions(video_path: Path, vlm, chat_region):
+    """Grab one representative frame, ask the VLM where the slide and chat
+    panes are. Coarse is fine — the per-frame content-crop absorbs slop."""
+    import cv2
+    from PIL import Image
+    cap = cv2.VideoCapture(str(video_path))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 100)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, total // 4)     # 25% in: deck is up
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        return None, chat_region
+    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    regions = await vlm.detect_regions(img)
+    slide = regions.get("slide_region")
+    chat = chat_region if chat_region else (
+        tuple(regions["chat_region"]) if regions.get("chat_region") else None)
+    return (tuple(slide) if slide else None), chat
 
-    def __init__(self) -> None:
-        try:
-            import pytesseract  # noqa: F401
-            self._ok = True
-        except ImportError:
-            log.warning("pytesseract/tesseract not installed — chat pane "
-                        "will be ignored (pip install pytesseract; "
-                        "apt install tesseract-ocr)")
-            self._ok = False
+
+class ChatPaneReader:
+    """Reads the Teams chat pane: VLM-backed when available (robust to real
+    fonts/avatars), tesseract OCR otherwise. Yields unseen messages only."""
+
+    def __init__(self, vlm=None) -> None:
+        self.vlm = vlm
+        self._ok = vlm is not None
+        if not self._ok:
+            try:
+                import pytesseract  # noqa: F401
+                self._ok = True
+            except ImportError:
+                log.warning("no VLM and no tesseract — chat pane ignored "
+                            "(pip install pytesseract / use --vlm)")
         self._seen: set[str] = set()
         self._prev_hash: int | None = None
 
     def new_messages(self, img) -> list[tuple[str, str]]:
         if not self._ok:
             return []
+        if self.vlm is not None:
+            return []        # async path handles VLM (new_messages_vlm)
         import pytesseract
         from aura.perception.slides import dhash
         h = dhash(img)
@@ -195,6 +228,21 @@ class ChatPaneReader:
             self._seen.add(key)
             out.append(line)
         return self._group(out)
+
+    async def new_messages_vlm(self, img) -> list[tuple[str, str]]:
+        from aura.perception.slides import dhash
+        h = dhash(img)
+        if self._prev_hash is not None and h == self._prev_hash:
+            return []
+        self._prev_hash = h
+        out = []
+        for person, text in await self.vlm.read_chat(img):
+            key = re.sub(r"[^a-z0-9?]", "", text.lower())
+            if len(key) < 4 or key in self._seen:
+                continue
+            self._seen.add(key)
+            out.append((person, text))
+        return out
 
     @staticmethod
     def _looks_like_name(line: str) -> bool:

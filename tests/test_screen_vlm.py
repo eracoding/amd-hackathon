@@ -116,3 +116,41 @@ async def test_observer_enriches_annotations_in_mock_mode(tmp_path,
     assert len(got) == 1
     assert got[0].text == "I do not understand this"
     assert got[0].kind == "question"
+
+
+@pytest.mark.asyncio
+async def test_region_detection_clamping(monkeypatch):
+    """VLM region boxes are clamped, validated, and overlap-checked."""
+    monkeypatch.setenv("AURA_LLM_MOCK", "1")
+    v = ScreenVLM()
+    img = Image.new("RGB", (1280, 720))
+    out = await v.detect_regions(img)
+    assert out["slide_region"] == [0.0, 0.0, 0.78, 1.0]
+    assert out["chat_region"] == [0.78, 0.0, 1.0, 1.0]
+
+    # malformed / implausible boxes are rejected, not propagated
+    async def bad(_s, _i, _p, max_tokens=120):
+        return {"slide_region": [0.4, 0.4, 0.45, 0.45],   # too small
+                "chat_region": "garbage"}
+    monkeypatch.setattr(v, "_chat_vision", bad)
+    out = await v.detect_regions(img)
+    assert out == {"slide_region": None, "chat_region": None}
+
+
+@pytest.mark.asyncio
+async def test_vlm_chat_reader_dedupe(monkeypatch):
+    """VLM chat path dedupes across samples and respects pane-hash gating."""
+    monkeypatch.setenv("AURA_LLM_MOCK", "1")
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).parent.parent))
+    from scripts.ingest_raw import ChatPaneReader
+    r = ChatPaneReader(vlm=ScreenVLM())
+    pane = Image.new("RGB", (300, 700), (248, 248, 248))
+    first = await r.new_messages_vlm(pane)
+    assert first == [("Anna", "Where is the data stored?")]
+    # identical pane -> hash-gated, no second VLM call result
+    assert await r.new_messages_vlm(pane) == []
+    # changed pane but same message text -> deduped
+    pane2 = Image.new("RGB", (300, 700), (240, 240, 240))
+    assert await r.new_messages_vlm(pane2) == []

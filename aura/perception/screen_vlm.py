@@ -41,6 +41,21 @@ CLASSIFIER_SYSTEM = (
     '"summary": "<one sentence, max 20 words>"}'
 )
 
+REGION_SYSTEM = (
+    "You see one screenshot of a meeting app (e.g. Teams) sharing a "
+    "presentation. Locate the SLIDE area (the presentation content) and, if "
+    "visible, the CHAT panel. Respond ONLY with JSON, coordinates as "
+    "fractions of the image (0-1): "
+    '{"slide_region": [x0, y0, x1, y1], "chat_region": [x0, y0, x1, y1] '
+    "or null}. Coarse boxes are fine; do not cut into the slide."
+)
+
+CHAT_READER_SYSTEM = (
+    "You see the chat panel of a meeting app. List every visible message. "
+    "Respond ONLY with JSON: "
+    '{"messages": [{"sender": "<name or empty>", "text": "<message>"}]}'
+)
+
 READER_SYSTEM = (
     "You see a small cropped image of a handwritten or typed annotation that "
     "a participant made on a presentation slide. Respond ONLY with JSON: "
@@ -119,6 +134,12 @@ class ScreenVLM:
             return {}
 
     def _mock(self, system: str) -> dict:
+        if "SLIDE area" in system:
+            return {"slide_region": [0.0, 0.0, 0.78, 1.0],
+                    "chat_region": [0.78, 0.0, 1.0, 1.0]}
+        if "chat panel" in system:
+            return {"messages": [{"sender": "Anna",
+                                  "text": "Where is the data stored?"}]}
         if "Classify" in system:
             return {"kind": "demo", "summary": "A terminal window with "
                                                "code output is visible."}
@@ -147,6 +168,49 @@ class ScreenVLM:
         return await self._chat_vision(
             READER_SYSTEM, patch_img,
             "Transcribe and classify this annotation.")
+
+    async def detect_regions(self, frame_img) -> dict:
+        """One-time region discovery: where is the slide, where is the chat.
+        Coarse VLM boxes are fine here — the per-frame content-crop absorbs
+        slop. Boxes are clamped and sanity-checked."""
+        out = await self._chat_vision(
+            REGION_SYSTEM, frame_img,
+            "Locate the slide area and the chat panel.", max_tokens=120)
+
+        def _clamp(box):
+            if (not isinstance(box, (list, tuple)) or len(box) != 4):
+                return None
+            x0, y0, x1, y1 = (max(0.0, min(1.0, float(v))) for v in box)
+            if x1 - x0 < 0.15 or y1 - y0 < 0.15:    # implausibly small
+                return None
+            return [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)]
+
+        slide = _clamp(out.get("slide_region"))
+        chat = _clamp(out.get("chat_region"))
+        if slide and chat:        # panes must not majorly overlap
+            ox = max(0.0, min(slide[2], chat[2]) - max(slide[0], chat[0]))
+            oy = max(0.0, min(slide[3], chat[3]) - max(slide[1], chat[1]))
+            if ox * oy > 0.25 * (chat[2] - chat[0]) * (chat[3] - chat[1]):
+                chat = None
+        log.info("auto regions: slide=%s chat=%s", slide, chat)
+        return {"slide_region": slide, "chat_region": chat}
+
+    async def read_chat(self, pane_img) -> list[tuple[str, str]]:
+        """VLM chat reading — more robust than OCR on real meeting-app
+        fonts/avatars. Shares the read budget."""
+        if self._read_calls >= READ_BUDGET:
+            return []
+        self._read_calls += 1
+        out = await self._chat_vision(
+            CHAT_READER_SYSTEM, pane_img, "List the visible messages.",
+            max_tokens=400)
+        msgs = []
+        for m in out.get("messages", []):
+            text = str(m.get("text", "")).strip()
+            if len(text) >= 4:
+                msgs.append((str(m.get("sender", "")).strip() or "chat",
+                             text))
+        return msgs
 
     def summary(self) -> dict:
         return {"classify_calls": self._classify_calls,

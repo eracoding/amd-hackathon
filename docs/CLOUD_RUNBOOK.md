@@ -88,10 +88,15 @@ slice before burning time on full files:
 ```bash
 ffmpeg -ss 60 -t 30 -i data/screen.mp4 -c copy /tmp/slice.mp4 -y
 
+# with the VLM serving (:8001), regions are found automatically:
 python -m scripts.ingest_raw --screen /tmp/slice.mp4 --deck data/slides.pdf \
-    --slide-region 0.0,0.05,0.78,0.95 --chat-region 0.78,0.10,1.0,0.95 \
-    --out /tmp/slice_test
+    --vlm --out /tmp/slice_test
+# (no VLM? pass them manually: --slide-region 0.0,0.05,0.78,0.95
+#  --chat-region 0.78,0.10,1.0,0.95)
 ```
+
+The log prints `auto regions: slide=[...] chat=[...]` — eyeball them against
+one frame; explicit --slide-region/--chat-region always override.
 
 Read the log: slide changes detected? chat lines sensible? If slides don't
 match, your regions are off — grab one frame to measure them:
@@ -109,16 +114,17 @@ its in-file time in each.
 python -m scripts.ingest_raw \
     --room data/cam.mp4 --audio data/mic.m4a --screen data/screen.mp4 \
     --deck data/slides.pdf \
-    --slide-region <yours> --chat-region <yours> \
     --sync "audio=<t>,room=<t>,screen=<t>" \
     --whisper medium --whisper-device auto \
     --vlm \
     --out recordings/session1            # drop --vlm if you skipped :8001
 ```
 
-Expect: attention events from the camera, transcript + voice questions from
-the audio, slide changes + annotations (+ VLM-read ink text) + OCR'd chat
-from the screen → `recordings/session1/events.jsonl`. Sanity-check it:
+With --vlm: regions auto-detected, chat read by the VLM (more robust than
+OCR on real Teams fonts), ink transcribed + intent-tagged, off-deck screens
+classified. Expect: attention events from the camera, transcript + voice
+questions from the audio, slide changes + annotations + chat messages from
+the screen → `recordings/session1/events.jsonl`. Sanity-check it:
 
 ```bash
 wc -l recordings/session1/events.jsonl
