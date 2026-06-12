@@ -1,0 +1,18 @@
+llm:
+  base_url: http://localhost:8000/v1
+  model: Qwen/Qwen2.5-7B-Instruct
+  max_tokens: 400
+  temperature: 0.2
+fusion:
+  tactical_window_s: 10
+  strategic_window_s: 60
+orchestrator:
+  slope_trigger: -0.15
+  analyst_period_s: 60
+  coach_cooldown_s: 90
+  max_actions_per_min: 4
+perception:
+  camera: 0
+  fps: 10
+  whisper_model: small
+  gateway_port: 8765

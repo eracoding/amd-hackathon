@@ -1,0 +1,24 @@
+# --- core (always needed) ---
+pydantic>=2.6
+aiohttp>=3.9
+
+# --- live perception (skip for --sim) ---
+opencv-python>=4.9
+# mediapipe <=0.10.14 ships the legacy `solutions` API (zero extra setup).
+# Newer builds (e.g. 0.10.3x) removed it; AURA auto-falls-back to the Tasks
+# API, which needs a one-time model download (URL in aura/perception/attention.py).
+mediapipe>=0.10,<=0.10.14
+faster-whisper>=1.0
+sounddevice>=0.4
+
+# --- LLM serving on AMD (install on the GPU box, see scripts/serve_llm.sh) ---
+# vLLM ROCm: follow https://docs.vllm.ai (ROCm install path), or:
+#   pip install vllm --extra-index-url https://download.pytorch.org/whl/rocm6.2
+# PyTorch ROCm (only if running whisper/vision on GPU):
+#   pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+
+# --- slide awareness & offline ingestion ---
+pypdfium2>=4.0
+fpdf2>=2.7        # tests only (synthesizes a deck)
+mss>=9.0          # live screen capture only (not needed for ingestion)
+python-pptx>=0.6.23   # PPT-B generator
