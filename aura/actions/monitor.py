@@ -101,7 +101,8 @@ main{flex:1;display:grid;grid-template-columns:1.1fr 1fr;gap:10px;min-height:0}
 </main>
 <script>
 const $=id=>document.getElementById(id);
-const ws=new WebSocket((location.protocol=='https:'?'wss':'ws')+'://'+location.host+'/ws');
+const base=(location.pathname.endsWith('/')?location.pathname.slice(0,-1):location.pathname);
+const ws=new WebSocket((location.protocol=='https:'?'wss':'ws')+'://'+location.host+base+'/ws');
 let logEmpty=true, chatEmpty=true;
 function addLog(badge,text,ts){
  if(logEmpty){$('log').innerHTML='';logEmpty=false}

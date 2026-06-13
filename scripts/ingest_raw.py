@@ -127,6 +127,7 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
     bus.subscribe("ScreenStateEvent", collect)
 
     chat = ChatPaneReader(vlm=vlm) if chat_region else None
+    sims: list[float] = []
     cap = cv2.VideoCapture(str(path))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(round(src_fps * sample_s)))
@@ -140,6 +141,7 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
         if idx % step == 0:
             img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             await obs.observe(crop_frac(img, slide_region), ts=ts)
+            sims.append(getattr(obs, "last_similarity", 0.0))
             obs_slide = obs.current or 0
             if chat and idx % chat_step == 0:
                 pane = crop_frac(img, chat_region)
@@ -158,6 +160,18 @@ async def ingest_screen_regions(path: Path, t0: float, deck_path: Path,
         idx += 1
     cap.release()
     await bus.drain()
+    if sims and not any(e["topic"] == "SlideChange" for e in collected):
+        import statistics as _st
+        log.warning(
+            "no slide matched. Best-page similarity over %d samples: "
+            "median %.2f, max %.2f (accept floor %.2f). %s",
+            len(sims), _st.median(sims), max(sims), 0.75,
+            "Similarities are LOW → the matcher is seeing the wrong crop: "
+            "pass --slide-region (or --vlm for auto-detection), and run "
+            "scripts/diagnose.py to measure it."
+            if max(sims) < 0.6 else
+            "Similarities are CLOSE → region is roughly right but distorted; "
+            "tighten --slide-region to exclude UI chrome.")
     n_slides = sum(1 for e in collected if e["topic"] == "SlideChange")
     n_ann = sum(1 for e in collected if e["topic"] == "ScreenAnnotationEvent")
     n_chat = sum(1 for e in collected if e["topic"] == "InteractionEvent")

@@ -56,6 +56,11 @@ CHAT_READER_SYSTEM = (
     '{"messages": [{"sender": "<name or empty>", "text": "<message>"}]}'
 )
 
+TITLE_SYSTEM = (
+    "You see a presentation slide. Respond ONLY with JSON: "
+    '{"title": "<the slide title text, empty if none visible>"}'
+)
+
 READER_SYSTEM = (
     "You see a small cropped image of a handwritten or typed annotation that "
     "a participant made on a presentation slide. Respond ONLY with JSON: "
@@ -137,6 +142,8 @@ class ScreenVLM:
         if "SLIDE area" in system:
             return {"slide_region": [0.0, 0.0, 0.78, 1.0],
                     "chat_region": [0.78, 0.0, 1.0, 1.0]}
+        if "slide title" in system.lower() or "title text" in system:
+            return {"title": ""}
         if "chat panel" in system:
             return {"messages": [{"sender": "Anna",
                                   "text": "Where is the data stored?"}]}
@@ -158,6 +165,16 @@ class ScreenVLM:
         self._last_kind = kind
         log.info("screen content: %s — %s", kind, out.get("summary", ""))
         return out
+
+    async def read_slide_title(self, img) -> dict:
+        """Read the visible slide title (for fuzzy deck matching when NCC
+        fails on re-rendered decks). Shares the classify budget."""
+        if self._classify_calls >= CLASSIFY_BUDGET:
+            return {}
+        self._classify_calls += 1
+        return await self._chat_vision(TITLE_SYSTEM, img,
+                                       "What is the slide title?",
+                                       max_tokens=60)
 
     async def read_annotation(self, patch_img) -> dict:
         """Explain a pre-localized annotation patch. The crop comes from the

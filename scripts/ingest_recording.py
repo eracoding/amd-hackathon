@@ -41,6 +41,8 @@ from aura.events import (                           # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("ingest")
 
+from aura.perception.speech import is_meta_question  # noqa: E402
+
 PAUSE_GAP_S = 3.0
 
 
@@ -79,8 +81,16 @@ def ingest_audio(path: Path, t0: float, model_size: str,
         return []
     compute = "float16" if device == "cuda" else "int8"
     model = WhisperModel(model_size, device=device, compute_type=compute)
-    segments, _ = model.transcribe(str(path), language=language,
-                                   vad_filter=True)
+    segments = list(model.transcribe(str(path), language=language,
+                                     vad_filter=True)[0])
+    if not segments:
+        # VAD swallowing everything = quiet recording (common with phone
+        # mics at distance). Retry without VAD before giving up.
+        log.warning("VAD removed all audio — likely a quiet recording. "
+                    "Retrying without VAD. (Consider normalizing: "
+                    "ffmpeg -i in.m4a -af loudnorm -ac 1 -ar 16000 out.wav)")
+        segments = list(model.transcribe(str(path), language=language,
+                                         vad_filter=False)[0])
     events, prev_end = [], None
     for seg in segments:
         text = seg.text.strip()
@@ -96,7 +106,7 @@ def ingest_audio(path: Path, t0: float, model_size: str,
             words_per_min=len(text.split()) / dur * 60.0, source="ingest")
         e.ts = t0 + seg.end
         events.append({"topic": e.topic, **e.model_dump()})
-        if text.rstrip().endswith("?"):
+        if text.rstrip().endswith("?") and not is_meta_question(text):
             q = InteractionEvent(person_id="voice",
                                  kind=InteractionKind.question,
                                  text=text, source="voice")

@@ -34,7 +34,8 @@ CLIENT_HTML = """<!doctype html><meta name=viewport content="width=device-width,
 <p id=ok style="color:green"></p>
 <script>
 const pid = 'web_' + Math.random().toString(36).slice(2,7);
-const ws = new WebSocket((location.protocol=='https:'?'wss':'ws')+'://'+location.host+'/ws');
+const base = (location.pathname.endsWith('/')?location.pathname.slice(0,-1):location.pathname);
+const ws = new WebSocket((location.protocol=='https:'?'wss':'ws')+'://'+location.host+base+'/ws');
 ws.onmessage = e => { const m = JSON.parse(e.data); if (m.slide) s.textContent = m.slide; };
 function send(kind){ if(!t.value.trim()) return;
   ws.send(JSON.stringify({person_id:pid, kind, text:t.value}));

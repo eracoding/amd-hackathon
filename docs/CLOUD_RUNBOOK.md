@@ -174,6 +174,20 @@ recordings/session1/annotations/*.png # the detected ink patches
 
 ---
 
+## Phase 3b — when a run produces zero events: diagnose, don't guess
+
+```bash
+python -m scripts.diagnose --audio data/mic.m4a \
+    --screen data/screen.mp4 --deck data/slides.pdf --vlm
+```
+
+One command answers both failure modes: audio loudness in dBFS with the
+exact ffmpeg normalize command if it's too quiet for VAD, and per-region
+match similarities (full frame vs. your region vs. VLM auto) over four
+sampled frames saved to `debug_frames/` — with a verdict telling you which
+region to use. Ingestion now also auto-retries audio without VAD and prints
+similarity stats whenever zero slides match.
+
 ## If something breaks
 
 | Symptom | Fix |
@@ -182,6 +196,13 @@ recordings/session1/annotations/*.png # the detected ink patches
 | `CTranslate2 ... CUDA` error from whisper | You forced `--whisper-device cuda`; use `auto` or `cpu` on AMD |
 | Disk full mid-download | `rm -rf ~/aura/hf_cache/hub/models--*` of anything half-downloaded; switch to Qwen2.5-3B-Instruct (`AURA_LLM_MODEL`) — ~6 GB |
 | Slides never match | Wrong `--slide-region`; verify on a single frame; remember fractions, not pixels |
+| `VAD removed all audio` | Quiet phone recording: `ffmpeg -i mic.m4a -af loudnorm=I=-16 -ac 1 -ar 16000 mic_norm.wav`, ingest the wav (pipeline auto-retries without VAD meanwhile) |
+| ONNX `device_discovery` DRM warnings | Harmless: onnxruntime (Silero VAD) probing /sys in a container. Ignore. |
+| Monitor stuck on "waiting for session" via proxy | Fixed: WS URL now preserves the jupyter-proxy path. Hard-refresh (Ctrl-Shift-R) after redeploying |
+| Debrief shows only slide 0 / 0.0 engagement | Slide match failed AND/OR camera found no faces — run `scripts/diagnose.py --screen ... --room ...` |
+| Faces not detected on wide IP-cam shots | `python -m scripts.ingest_room_ar --room cam.mp4 --ar-path <attention_room> --estimator onnx --model <model> --merge-into <events.jsonl> --t0 <room t0>` |
+| "Unresolved questions" are the presenter's own prompts | Fixed: meta-questions ("any questions?", "do we have a question…") are filtered from voice-question detection |
+| Annotations missed on Teams/PowerPoint Live | Fixed: diffing now uses a LIVE reference (the screen's own first stable frame per slide), renderer-independent; VLM title fallback identifies slides when NCC fails |
 | Chat OCR garbage | Crop the chat region tighter (exclude avatars); if still noisy, drop `--chat-region` — voice + annotations still flow |
 | Monitor proxy won't load | Run replay `--no-monitor` for metrics; do the visual demo locally against the tunneled LLM |
-| GPU OOM with both models | Lower `--gpu-memory-utilization` (0.5 text / 0.3 VL) — you have VRAM to spare; OOM means another tenant or stale process: `rocm-smi`, kill yours, restart |
+| GPU OOM with both models | Utilizations must sum < 1.0: vLLM PREALLOCATES that fraction at startup (165 GB used by an idle 7B is normal). Use 0.40 text / 0.35 VL — you have VRAM to spare; OOM means another tenant or stale process: `rocm-smi`, kill yours, restart |

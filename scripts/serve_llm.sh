@@ -9,7 +9,7 @@ python -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" \
   --dtype bfloat16 \
   --max-model-len 8192 \
-  --gpu-memory-utilization 0.85 \
+  --gpu-memory-utilization 0.40 \
   --port 8000
 
 # Optional second instance for Tier-2 screen understanding (run in another

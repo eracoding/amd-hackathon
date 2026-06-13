@@ -24,6 +24,16 @@ try:
 except (ImportError, OSError):  # pragma: no cover
     _AUDIO_OK = False  # OSError: sounddevice without PortAudio installed
 
+META_QUESTION = __import__("re").compile(
+    r"(any (more |other )?questions|do (we|you) have (a |any )?question"
+    r"|what('s| is) your question|you have a question|questions so far"
+    r"|des questions|avez-vous des questions)", __import__("re").IGNORECASE)
+
+
+def is_meta_question(text: str) -> bool:
+    """Presenter prompts ABOUT questions are not audience questions."""
+    return bool(META_QUESTION.search(text))
+
 SAMPLE_RATE = 16_000
 CHUNK_S = 5.0
 SILENCE_RMS = 0.01
@@ -75,7 +85,7 @@ class SpeechPipeline:
                     text=text, t_start=t0 + seg.start, t_end=t0 + seg.end,
                     words_per_min=len(text.split()) / dur * 60.0, source="mic",
                 ))
-                if text.rstrip().endswith("?"):
+                if text.rstrip().endswith("?") and not is_meta_question(text):
                     # voice question heuristic (diarization = future work)
                     await self.bus.publish(InteractionEvent(
                         person_id="voice", kind=InteractionKind.question,

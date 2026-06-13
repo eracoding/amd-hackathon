@@ -131,6 +131,20 @@ class DeckIndex:
     def page(self, n: int) -> dict:
         return self.pages[n - 1]
 
+    def match_title(self, text: str) -> tuple[int | None, float]:
+        """Fuzzy-match a (VLM-read) slide title against deck page titles."""
+        import difflib
+        text = " ".join(text.lower().split())
+        if len(text) < 4:
+            return None, 0.0
+        best_n, best_r = None, 0.0
+        for p in self.pages:
+            r = difflib.SequenceMatcher(
+                None, text, p["title"].lower()).ratio()
+            if r > best_r:
+                best_n, best_r = p["n"], r
+        return (best_n, best_r) if best_r >= 0.55 else (None, best_r)
+
     def render_page(self, n: int, scale: float = 1.0) -> "Image.Image":
         """Lazy render cache — used by ScreenObserver (clean reference) and
         the PPT-B generator (slide backgrounds)."""
@@ -276,9 +290,16 @@ class ScreenObserver(ScreenSlideTracker):
     def __init__(self, bus: EventBus, deck: DeckIndex,
                  capture_fn=None, period_s: float = 0.5,
                  patch_dir: str | Path = "sessions/annotations",
-                 vlm=None) -> None:
+                 vlm=None, ref_mode: str = "live") -> None:
         super().__init__(bus, deck, capture_fn=capture_fn, period_s=period_s)
         self.vlm = vlm                 # optional ScreenVLM (Tier-2)
+        # ref_mode "live": diff against the screen's OWN first stable frame
+        # of each slide — renderer-independent (PowerPoint Live re-renders
+        # slides differently from the PDF export, which breaks "pdf" mode
+        # on real footage). "pdf": diff against the rendered deck page.
+        self.ref_mode = ref_mode
+        self._live_refs: dict[int, "np.ndarray"] = {}
+        self._unmatched_for_title = 0
         self.patch_dir = Path(patch_dir)
         self.patch_dir.mkdir(parents=True, exist_ok=True)
         self._refs: dict[int, "np.ndarray"] = {}        # page -> gray ref
@@ -309,6 +330,12 @@ class ScreenObserver(ScreenSlideTracker):
         """Slide tracking (parent) + annotation diffing on the current page
         + VLM escalation when the screen shows something off-deck."""
         event = await super().observe(img, ts=ts)
+        if event is None and self.vlm is not None:
+            event = await self._title_fallback(img, ts)
+        if event is not None and self.ref_mode == "live":
+            # new slide confirmed: baseline = what the screen ACTUALLY shows
+            self._set_live_ref(event.slide, img)
+            return event               # never diff the baseline frame
         if self.vlm is not None and self.vlm.note_match(self.last_similarity):
             out = await self.vlm.classify_screen(img)
             if out:
@@ -322,15 +349,56 @@ class ScreenObserver(ScreenSlideTracker):
             await self._detect_annotations(img, ts=ts)
         return event
 
+    def _set_live_ref(self, page: int, img) -> None:
+        import cv2
+        g = cv2.cvtColor(
+            cv2.resize(np.asarray(_content_crop(img).convert("RGB")),
+                       DIFF_SIZE), cv2.COLOR_RGB2GRAY)
+        g = cv2.GaussianBlur(g, (3, 3), 0)
+        edges = cv2.dilate(cv2.Canny(g, 60, 120), np.ones((5, 5), np.uint8))
+        self._live_refs[page] = (g, edges)
+        self._acc[page] = np.zeros(DIFF_SIZE[::-1], dtype=np.uint8)
+
+    async def _title_fallback(self, img, ts) -> "SlideChange | None":
+        """NCC failed (re-rendered deck, theme drift): read the visible
+        title with the VLM and fuzzy-match it to the deck. Budgeted by the
+        same call cap as classification."""
+        if self.last_similarity >= 0.55:       # NCC is close; let it work
+            self._unmatched_for_title = 0
+            return None
+        self._unmatched_for_title += 1
+        if self._unmatched_for_title < 3:      # debounce
+            return None
+        self._unmatched_for_title = 0
+        out = await self.vlm.read_slide_title(_content_crop(img))
+        title = (out or {}).get("title", "")
+        page, score = self.deck.match_title(title)
+        if page is None or page == self.current:
+            return None
+        self.current = page
+        p = self.deck.page(page)
+        event = SlideChange(slide=page, title=p["title"], content=p["text"],
+                            source="screen-vlm")
+        if ts is not None:
+            event.ts = ts
+        await self.bus.publish(event)
+        log.info("slide -> %d via VLM title match (%.2f: %r)",
+                 page, score, title[:60])
+        return event
+
     async def _detect_annotations(self, img, ts: float | None = None) -> None:
         import cv2
         page = self.current
+        if self.ref_mode == "live" and page not in self._live_refs:
+            self._set_live_ref(page, img)      # first sight of this slide
+            return
         content = _content_crop(img)
         cur = cv2.cvtColor(
             cv2.resize(np.asarray(content.convert("RGB")), DIFF_SIZE),
             cv2.COLOR_RGB2GRAY)
         cur = cv2.GaussianBlur(cur, (3, 3), 0)
-        ref, edge_mask = self._ref_gray(page)
+        ref, edge_mask = (self._live_refs[page] if self.ref_mode == "live"
+                          else self._ref_gray(page))
         diff = (cv2.absdiff(cur, ref) > DIFF_THRESH).astype(np.uint8)
         diff[edge_mask > 0] = 0
         acc = self._acc.setdefault(
