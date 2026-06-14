@@ -25,7 +25,7 @@ log = logging.getLogger("aura.orchestrator")
 
 SLOPE_TRIGGER = -0.15        # engagement loss per minute
 ANALYST_PERIOD_S = 60.0
-COACH_COOLDOWN_S = 90.0
+COACH_COOLDOWN_S = 45.0
 MAX_ACTIONS_PER_MIN = 4
 TICK_S = 5.0
 
@@ -88,6 +88,11 @@ class Orchestrator:
 
     async def _on_end(self, _e: SessionEnd) -> None:
         state = self.fusion.snapshot()
+        if not self.fusion.slide_stats() and state.people_present == 0:
+            log.warning("session had NO attention and NO slide data — the "
+                        "camera (ingest_room_ar) and/or screen events were "
+                        "not merged into this events.jsonl. The debrief will "
+                        "be near-empty. Re-merge the camera stream.")
         import json as _json
         timeline = ("SLIDE_STATS:" + _json.dumps(self.fusion.slide_stats())
                     + "\nEVENTS:\n" + "\n".join(self._timeline))
@@ -115,10 +120,14 @@ class Orchestrator:
             if slope_alarm or periodic:
                 self._last_analyst = now
                 insight = await self.analyst.run(state)
-                if slope_alarm:
-                    await self._emit(insight)
+                finding = insight.payload.get("finding", "stable")
                 severity = insight.payload.get("severity", "low")
-                if severity in ("medium", "high") and now - self._last_coach > COACH_COOLDOWN_S:
+                # surface the analyst's reasoning whenever it found something
+                if finding != "stable" or slope_alarm:
+                    await self._emit(insight)
+                # coach follows the analyst on any real problem
+                if (finding == "engagement_drop" or severity in ("medium", "high")) \
+                        and now - self._last_coach > COACH_COOLDOWN_S:
                     self._last_coach = now
                     await self._emit(await self.coach.run(state))
         await self.bus.drain()

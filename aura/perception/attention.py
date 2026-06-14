@@ -26,14 +26,16 @@ try:  # heavy deps are optional so the sim path works anywhere
     import mediapipe as mp
     import numpy as np
     _VISION_OK = True
+    _VISION_IMPORT_ERROR = ""
     # MediaPipe >= ~0.10.2x removed the legacy `solutions` API in some builds.
     _LEGACY_API = hasattr(mp, "solutions")
     if not _LEGACY_API:  # Tasks API path (needs a downloaded .task model)
         from mediapipe.tasks import python as mp_tasks  # noqa: F401
         from mediapipe.tasks.python import vision as mp_vision
-except ImportError:  # pragma: no cover
+except ImportError as _e:  # pragma: no cover
     _VISION_OK = False
     _LEGACY_API = False
+    _VISION_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 FACE_LANDMARKER_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
@@ -79,8 +81,18 @@ class AttentionTracker:
     def __init__(self, bus: EventBus, camera: int | str = 0, fps: float = 10.0,
                  max_faces: int = 6, model_path: str = "face_landmarker.task") -> None:
         if not _VISION_OK:
-            raise RuntimeError("Install opencv-python + mediapipe for live vision, "
-                               "or run with --sim.")
+            raise RuntimeError(
+                "AURA's built-in MediaPipe attention tracker is unavailable "
+                f"({_VISION_IMPORT_ERROR}).\n"
+                "  • Fix the import:  pip install opencv-python-headless "
+                "'mediapipe<=0.10.14'\n"
+                "  • OR (recommended for far-distance room cameras) skip this "
+                "tracker entirely and use your RetinaFace stack:\n"
+                "      run ingest_raw WITHOUT --room, then\n"
+                "      python -m scripts.ingest_room_ar --room <cam> "
+                "--ar-path <attention_room> --estimator onnx --model "
+                "<gaze.onnx> --detector retinaface --merge-into "
+                "<events.jsonl> --t0 <room t0>")
         self.bus = bus
         self.camera = camera
         self.period = 1.0 / fps

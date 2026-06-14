@@ -33,22 +33,30 @@ class Agent:
 class EngagementAnalyst(Agent):
     name = "EngagementAnalyst"
     system = (
-        "You are EngagementAnalyst inside AURA, a meeting-room intelligence "
-        "system. Input: a JSON room state with per-window engagement, slope, "
-        "speech rate, transcript tail and slide context. Diagnose attention "
-        "dynamics and the probable cause (pace, content density, topic shift, "
-        "fatigue, off-screen distraction). Respond ONLY with JSON: "
+        "You are EngagementAnalyst inside AURA, watching a live presentation. "
+        "Input: a JSON room state with per-window engagement, slope, speech "
+        "rate (wpm), the recent transcript, the current slide, and any "
+        "off-deck screen content. Diagnose the room's attention and explain "
+        "WHY, citing concrete evidence from the transcript or pace. Respond "
+        "ONLY with JSON: "
         '{"finding": "engagement_drop|stable|recovering|high_engagement", '
-        '"confidence": 0..1, "probable_cause": str, "severity": "low|medium|high"}'
+        '"confidence": 0..1, '
+        '"probable_cause": "<specific cause, e.g. \'pace spiked to 190 wpm '
+        "while covering dense architecture on slide 4'>\", "
+        '"evidence": "<short quote or metric from the room state>", '
+        '"severity": "low|medium|high"}'
     )
 
     async def run(self, state: RoomState) -> AgentAction:
         out = await self.ask(state)
         state.annotations["analyst"] = out
+        cause = out.get("probable_cause", "")
+        ev = out.get("evidence", "")
+        msg = cause + (f"  ({ev})" if ev else "")
         return AgentAction(
             agent=self.name, action="insight",
-            priority="high" if out.get("severity") == "high" else "low",
-            message=f"{out.get('finding','?')} — {out.get('probable_cause','')}",
+            priority="high" if out.get("severity") == "high" else "medium",
+            message=msg or out.get("finding", "?"),
             payload=out, source="agent",
         )
 
@@ -84,12 +92,16 @@ class Moderator(Agent):
 class PresenterCoach(Agent):
     name = "PresenterCoach"
     system = (
-        "You are PresenterCoach inside AURA. Given the room state and the "
-        "Analyst's finding (in notes.analyst), produce ONE short, concrete, "
-        "actionable nudge for the presenter (<= 25 words). Examples: slow down, "
-        "recap in one sentence, ask the room a question, skip detail, take "
-        "questions now. Respond ONLY with JSON: "
-        '{"action": "nudge|noop", "message": str, "priority": "low|medium|high"}'
+        "You are PresenterCoach inside AURA. You see the room state and the "
+        "Analyst's diagnosis (in notes.analyst). Give the presenter ONE "
+        "specific, actionable piece of coaching that names WHAT went wrong "
+        "and WHAT to do about it — grounded in the actual evidence, not "
+        "generic advice. Good: 'You hit ~190 wpm on the architecture slide "
+        "and 2 of 3 people looked down — pause, restate the key idea in one "
+        "plain sentence, then ask if it landed.' Bad: 'Slow down.' Respond "
+        'ONLY with JSON: {"action": "nudge|noop", '
+        '"message": "<= 40 words, specific", '
+        '"what_went_wrong": "<short>", "priority": "low|medium|high"}'
     )
 
     async def run(self, state: RoomState) -> AgentAction:

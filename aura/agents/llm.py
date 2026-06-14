@@ -104,10 +104,17 @@ class LLMClient:
         eng = state.get("engagement", {})
         if "EngagementAnalyst" in system:
             slope = eng.get("slope_per_min", 0)
+            wpm = state.get("speech", {}).get("wpm", 0)
             low = slope < -0.1 or eng.get("now", 1) < 0.45
+            slide = state.get("slide", {})
             return {"finding": "engagement_drop" if low else "stable",
-                    "confidence": 0.8 if low else 0.6,
-                    "probable_cause": "content density and pace" if low else "n/a",
+                    "confidence": 0.82 if low else 0.6,
+                    "probable_cause": (
+                        f"pace rose to ~{wpm} wpm on dense material "
+                        f"(slide {slide.get('n','?')}: {slide.get('title','')})"
+                        if low else "attention steady, pace comfortable"),
+                    "evidence": (f"engagement {eng.get('now')}, slope "
+                                 f"{slope}/min" if low else ""),
                     "severity": "high" if low else "low"}
         if "Moderator" in system:
             qs = state.get("pending_questions", [])
@@ -115,9 +122,15 @@ class LLMClient:
                     "question_ids": [q["id"] for q in qs[:3]],
                     "summary": "; ".join(q["text"] for q in qs[:3])}
         if "PresenterCoach" in system:
+            an = state.get("notes", {}).get("analyst", {})
+            wpm = state.get("speech", {}).get("wpm", 0)
             return {"action": "nudge",
-                    "message": "Engagement is dipping — pause, recap the key point "
-                               "in one sentence, and slow your pace.",
+                    "what_went_wrong": an.get("probable_cause",
+                                              "pace outran comprehension"),
+                    "message": (f"You hit ~{wpm} wpm on dense content and the "
+                                "room drifted — pause, restate the core idea "
+                                "in one plain sentence, then check it landed "
+                                "before moving on."),
                     "priority": "high"}
         if "Summarizer" in system:
             per_slide, unresolved = [], []

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 
 from .actions.sink import ActionSink
 from .agents.llm import LLMClient
@@ -38,6 +39,15 @@ async def run(args: argparse.Namespace) -> None:
                               push_period_s=min(1.0, tick))
         tasks.append(asyncio.create_task(monitor.run()))
         print(f"Room monitor (view-only): http://localhost:{args.monitor_port}")
+
+    if args.theater:
+        from .actions.theater import TheaterMonitor
+        rec_dir = (Path(args.replay).parent if args.replay else None)
+        theater = TheaterMonitor(bus, fusion, recording_dir=rec_dir,
+                                 port=args.theater_port,
+                                 push_period_s=min(0.5, tick), speed=args.speed)
+        tasks.append(asyncio.create_task(theater.run()))
+        print(f"Theater (live demo view): http://localhost:{args.theater_port}")
 
     if args.sim:
         from .perception.simulate import run_simulated_session
@@ -98,6 +108,10 @@ def main() -> None:
                         help="participant gateway port (with --gateway)")
     parser.add_argument("--monitor-port", type=int, default=8766)
     parser.add_argument("--no-monitor", action="store_true")
+    parser.add_argument("--theater", action="store_true",
+                        help="live demo view: raw room+screen video + "
+                             "transcript streaming in sync with agent reasoning")
+    parser.add_argument("--theater-port", type=int, default=8767)
     parser.add_argument("--tick", type=float, default=0.5,
                         help="sim seconds per tick (lower = faster replay)")
     parser.add_argument("--speed", type=float, default=2.0,
