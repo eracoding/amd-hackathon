@@ -118,7 +118,8 @@ def test_attention_room_adapter_mapping():
         track_id: int = None; face_index: int = 0
 
     def classify(yaw, pitch, blink, _cfg):
-        return ("screen", 0.9) if abs(yaw) < 20 else ("right", 0.8)
+        # attention_room returns "own_screen", not "screen" — adapter must map it
+        return ("own_screen", 0.9) if abs(yaw) < 20 else ("right", 0.8)
 
     e = result_to_event(R(5.0, 2.0, 0.1, track_id=3), classify, None, 1234.5)
     assert e.person_id == "person_3" and e.attention == 0.9

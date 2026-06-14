@@ -37,7 +37,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aura.events import AttentionEvent, SessionEnd   # noqa: E402
 
+SCREEN_TARGETS = {"screen", "own_screen", "presenter", "front",
+                  "shared_screen", "board"}
 AWAY_SCORE = 0.15        # attention when gaze target is not the screen
+
+
+def _is_attending(target: str) -> bool:
+    return str(target).lower() in SCREEN_TARGETS
 
 
 def load_attention_room(ar_path: Path):
@@ -112,7 +118,7 @@ def result_to_event(r, classify, cfg, ts: float) -> AttentionEvent:
     """GazeResult -> AURA AttentionEvent via the user's own target logic."""
     target, conf = classify(getattr(r, "yaw", 0.0), getattr(r, "pitch", 0.0),
                             getattr(r, "blink", 0.0), cfg)
-    attention = float(conf) if target == "screen" else AWAY_SCORE
+    attention = float(conf) if _is_attending(target) else AWAY_SCORE
     pid = (f"person_{r.track_id}" if getattr(r, "track_id", None) is not None
            else f"person_{getattr(r, 'face_index', 0)}")
     e = AttentionEvent(person_id=pid, attention=round(attention, 3),

@@ -45,7 +45,9 @@ async def run(args: argparse.Namespace) -> None:
         rec_dir = (Path(args.replay).parent if args.replay else None)
         theater = TheaterMonitor(bus, fusion, recording_dir=rec_dir,
                                  port=args.theater_port,
-                                 push_period_s=min(0.5, tick), speed=args.speed)
+                                 push_period_s=min(0.5, tick), speed=args.speed,
+                                 room_video=args.room_video,
+                                 screen_video=args.screen_video)
         tasks.append(asyncio.create_task(theater.run()))
         print(f"Theater (live demo view): http://localhost:{args.theater_port}")
 
@@ -112,6 +114,12 @@ def main() -> None:
                         help="live demo view: raw room+screen video + "
                              "transcript streaming in sync with agent reasoning")
     parser.add_argument("--theater-port", type=int, default=8767)
+    parser.add_argument("--room-video",
+                        help="explicit path to the room camera video for "
+                             "theater (overrides auto-detection)")
+    parser.add_argument("--screen-video",
+                        help="explicit path to the screen capture video for "
+                             "theater")
     parser.add_argument("--tick", type=float, default=0.5,
                         help="sim seconds per tick (lower = faster replay)")
     parser.add_argument("--speed", type=float, default=2.0,

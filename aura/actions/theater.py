@@ -197,7 +197,9 @@ class TheaterMonitor:
     def __init__(self, bus: EventBus, fusion: RoomStateBuilder,
                  recording_dir: str | Path | None = None,
                  host: str = "0.0.0.0", port: int = 8767,
-                 push_period_s: float = 0.5, speed: float = 1.0) -> None:
+                 push_period_s: float = 0.5, speed: float = 1.0,
+                 room_video: str | None = None,
+                 screen_video: str | None = None) -> None:
         if not _WEB_OK:
             raise RuntimeError("Install aiohttp for the theater monitor.")
         self.bus = bus
@@ -206,6 +208,7 @@ class TheaterMonitor:
         self.push_period_s = push_period_s
         self.speed = speed
         self.rec = Path(recording_dir) if recording_dir else None
+        self._overrides = {"room": room_video, "screen": screen_video}
         self._clients: set[web.WebSocketResponse] = set()
         self._stop = asyncio.Event()
         self._session_start: float | None = None
@@ -215,8 +218,41 @@ class TheaterMonitor:
         bus.subscribe(SessionEnd, self._on_end)
 
     def _video(self, name: str) -> Path | None:
-        if not self.rec:
-            return None
+        # explicit override wins (set via --room-video / --screen-video)
+        override = self._overrides.get(name)
+        if override and Path(override).exists():
+            return Path(override)
+        bases = []
+        if self.rec:
+            bases += [self.rec, self.rec.parent]
+        bases.append(Path.cwd())
+        # 1) sidecar file next to events.jsonl
+        for base in bases:
+            for ext in (".mp4", ".webm", ".mov", ".mkv"):
+                p = base / f"{name}{ext}"
+                if p.exists():
+                    return p
+        # 2) manifest path, resolved against several plausible roots
+        import json
+        for base in bases:
+            mani = base / "manifest.json"
+            if not mani.exists():
+                continue
+            try:
+                streams = json.loads(mani.read_text()).get("streams", {})
+            except (ValueError, OSError):
+                continue
+            if name not in streams:
+                continue
+            raw = streams[name]["path"]
+            cands = [Path(raw), Path(raw).resolve(),
+                     base / raw, base / Path(raw).name,
+                     base.parent / raw, base.parent / Path(raw).name,
+                     Path.cwd() / raw, Path.cwd() / Path(raw).name]
+            for c in cands:
+                if c.exists():
+                    return c
+        return None
         for ext in (".mp4", ".webm", ".mov", ".mkv"):
             p = self.rec / f"{name}{ext}"
             if p.exists():
@@ -322,6 +358,13 @@ class TheaterMonitor:
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         log.info("theater monitor at http://%s:%d", self.host, self.port)
+        rv, sv = self._video("room"), self._video("screen")
+        log.info("theater room video:   %s", rv or "NOT FOUND (no room video)")
+        log.info("theater screen video: %s", sv or "NOT FOUND (no screen video)")
+        if rv is None and sv is None:
+            log.warning("no videos resolved — pass --room-video / --screen-video "
+                        "with explicit paths, or place room.mp4 / screen.mp4 "
+                        "next to events.jsonl")
         try:
             while not self._stop.is_set():
                 await asyncio.sleep(self.push_period_s)
