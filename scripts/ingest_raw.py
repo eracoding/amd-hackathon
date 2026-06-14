@@ -299,6 +299,17 @@ async def main() -> None:
     ap.add_argument("--whisper", default="small")
     ap.add_argument("--whisper-device", default="auto")
     ap.add_argument("--language", default="en")
+    ap.add_argument("--room-detector",
+                    choices=["mediapipe", "retinaface"], default="mediapipe",
+                    help="face detector for --room. retinaface (via your "
+                         "attention_room package) for far/distant faces")
+    ap.add_argument("--ar-path", help="attention_room package path "
+                    "(for --room-detector retinaface)")
+    ap.add_argument("--gaze-model", help="gaze ONNX model "
+                    "(for --room-detector retinaface)")
+    ap.add_argument("--det-width", type=int, default=1280)
+    ap.add_argument("--min-conf", type=float, default=0.3)
+    ap.add_argument("--max-faces", type=int, default=6)
     ap.add_argument("--vlm", action="store_true",
                     help="explain off-deck screens & read annotations with "
                          "Qwen2.5-VL (AURA_VLM_URL, default :8001)")
@@ -320,7 +331,30 @@ async def main() -> None:
     if args.room:
         t0 = BASE_T + offsets.get("room", 0.0)
         manifest["streams"]["room"] = {"path": args.room, "t0": t0}
-        events += await ingest_video(Path(args.room), t0, args.attn_fps)
+        if args.room_detector == "retinaface":
+            # far-distance shot -> your attention_room RetinaFace stack
+            if not args.ar_path or not args.gaze_model:
+                sys.exit("--room with retinaface needs --ar-path and "
+                         "--gaze-model (your gaze .onnx)")
+            from scripts.ingest_room_ar import (
+                build_estimator, ingest_room_with_estimator,
+                load_attention_room)
+            classify, cfg = load_attention_room(Path(args.ar_path))
+            est = build_estimator(Path(args.ar_path), "onnx",
+                                  args.gaze_model, cfg, args.max_faces,
+                                  detector="retinaface",
+                                  det_width=args.det_width,
+                                  min_conf=args.min_conf)
+            events += ingest_room_with_estimator(
+                Path(args.room), est, classify, cfg, t0, args.attn_fps)
+        else:
+            try:
+                events += await ingest_video(Path(args.room), t0,
+                                             args.attn_fps)
+            except RuntimeError as e:
+                log.error("room camera skipped: %s", e)
+                log.error("use --room-detector retinaface (with --ar-path "
+                          "and --gaze-model) for far-distance cameras.")
     if args.audio:
         t0 = BASE_T + offsets.get("audio", 0.0)
         manifest["streams"]["audio"] = {"path": args.audio, "t0": t0}

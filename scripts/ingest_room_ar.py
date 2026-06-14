@@ -75,16 +75,37 @@ def build_estimator(ar_path: Path, kind: str, model: str,
         face_box_provider = detectors.UnifaceFaceBoxProvider(
             max_faces=max_faces, det_width=det_width,
             min_confidence=min_conf)
-        log.info("face detector: RetinaFace (uniface), det_width=%d, "
-                 "min_conf=%.2f", det_width, min_conf)
+        log.info(f"face detector: RetinaFace (uniface), "
+                 f"det_width={det_width}, min_conf={min_conf}")
     else:
         log.info("face detector: MediaPipe landmarker (near-face only)")
 
     return onnx.OnnxGazeEstimator(
         model, cfg, max_faces=max_faces,
+        accelerator=_cpu_accelerator(ar_path),
         face_box_provider=face_box_provider,
         detector_model=(detector_model if face_box_provider is None
                         else None))
+
+
+def _cpu_accelerator(ar_path: Path):
+    """Force the CPU ONNX provider. onnxruntime-gpu on a ROCm box can't load
+    CUDA libs (libcublasLt.so.12 etc.), so letting it try just spams errors
+    and slows startup. CPU is correct for offline ingestion anyway."""
+    try:
+        dev = importlib.import_module("attention_room.core.device")
+        for kw in ("preference", "device", "pref"):
+            try:
+                return dev.Accelerator(**{kw: "cpu"})
+            except TypeError:
+                continue
+        acc = dev.Accelerator()
+        for attr in ("preference", "pref", "device"):
+            if hasattr(acc, attr):
+                setattr(acc, attr, "cpu")
+        return acc
+    except Exception:
+        return None
 
 
 def result_to_event(r, classify, cfg, ts: float) -> AttentionEvent:
@@ -109,7 +130,13 @@ def ingest_room_with_estimator(video: Path, estimator, classify, cfg,
     cap = cv2.VideoCapture(str(video))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(round(src_fps / sample_fps)))
-    events, idx = [], 0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    n_sampled = (total // step) if total else 0
+    print(f"processing ~{n_sampled} sampled frames "
+          f"(every {step}th of {total}) on CPU — this can take a few "
+          f"minutes; progress every 25 frames...", flush=True)
+    import time as _t
+    events, idx, done, t_start = [], 0, 0, _t.time()
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -117,9 +144,19 @@ def ingest_room_with_estimator(video: Path, estimator, classify, cfg,
         if idx % step == 0:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             media_t = idx / src_fps
+            faces_here = 0
             for r in estimator.estimate(rgb, int(media_t * 1000)):
                 e = result_to_event(r, classify, cfg, t0 + media_t)
                 events.append({"topic": e.topic, **e.model_dump()})
+                faces_here += 1
+            done += 1
+            if done % 25 == 0:
+                rate = done / max(1e-6, _t.time() - t_start)
+                eta = (n_sampled - done) / max(rate, 1e-6)
+                print(f"  {done}/{n_sampled} frames "
+                      f"({rate:.1f} fps, ETA {eta:.0f}s) — "
+                      f"{len({e['person_id'] for e in events})} tracklet(s) "
+                      f"so far", flush=True)
         idx += 1
     cap.release()
     people = {e["person_id"] for e in events}
