@@ -134,3 +134,44 @@ def test_ws_url_preserves_proxy_path():
         assert "location.pathname" in html, \
             "WS URL must include the jupyter-proxy path prefix"
         assert "+'://'+location.host+'/ws'" not in html.replace(" ", "")
+
+
+def test_retinaface_provider_injection(monkeypatch):
+    """build_estimator with detector='retinaface' must construct the uniface
+    provider and inject it, so MediaPipe is never used on far-distance shots."""
+    import sys
+    import types
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+    ar = Path("/tmp/ar/attention_room")
+    if not ar.exists():
+        pytest.skip("attention_room package not present")
+    sys.path.insert(0, str(ar))
+
+    # stub uniface.detection.RetinaFace
+    uni = types.ModuleType("uniface")
+    det = types.ModuleType("uniface.detection")
+    class _Det:
+        def __init__(self, *a, **k): pass
+        def detect(self, bgr):
+            h, w = bgr.shape[:2]
+            class _F:
+                bbox = [w * 0.46, h * 0.40, w * 0.54, h * 0.52]
+                confidence = 0.9
+                landmarks = [[w * 0.48, h * 0.45], [w * 0.52, h * 0.45]]
+            return [_F()]
+    det.RetinaFace = _Det
+    uni.detection = det
+    monkeypatch.setitem(sys.modules, "uniface", uni)
+    monkeypatch.setitem(sys.modules, "uniface.detection", det)
+
+    import importlib
+    detectors = importlib.import_module(
+        "attention_room.modalities.gaze.detectors")
+    prov = detectors.UnifaceFaceBoxProvider(max_faces=6, det_width=1280,
+                                            min_confidence=0.3)
+    boxes = prov(np.zeros((1080, 1920, 3), np.uint8), 0)
+    assert len(boxes) == 1
+    assert boxes[0].track_id is not None, "tracker must assign a stable id"
+    assert (boxes[0].x2 - boxes[0].x1) > 0

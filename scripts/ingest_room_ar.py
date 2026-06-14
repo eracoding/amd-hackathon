@@ -7,8 +7,15 @@ detectors + gaze estimators do.
         --room data/cam.mp4 \
         --ar-path ~/attention_room \
         --estimator onnx --model ~/attention_room/models/gaze.onnx \
+        --detector retinaface --det-width 1280 --min-conf 0.3 \
         --merge-into recordings/session1/events.jsonl \
         --t0 1000.0            # the room stream's t0 from manifest.json
+
+FAR-DISTANCE FACES (the whole reason this exists): --detector retinaface
+(default) uses uniface's RetinaFace, which finds small/distant faces a
+webcam-oriented landmarker misses. If people still aren't detected, raise
+--det-width (1280 -> 1600) and lower --min-conf (0.3 -> 0.2). Requires
+`pip install uniface` and your gaze ONNX model.
 
 What you provide: your package path, which estimator (mediapipe|onnx) and
 its model file — the same arguments your `run_gaze_node.py` uses. The
@@ -47,14 +54,37 @@ def load_attention_room(ar_path: Path):
 
 
 def build_estimator(ar_path: Path, kind: str, model: str,
-                    cfg, max_faces: int):
+                    cfg, max_faces: int, detector: str = "retinaface",
+                    det_width: int = 960, min_conf: float = 0.5,
+                    detector_model: str | None = None):
     est = importlib.import_module(
         "attention_room.modalities.gaze.estimators")
     if kind == "mediapipe":
         return est.MediaPipeGazeEstimator(model, cfg, max_faces=max_faces)
+
     onnx = importlib.import_module(
         "attention_room.modalities.gaze.onnx_estimator")
-    return onnx.OnnxGazeEstimator(model, cfg)
+
+    # FACE DETECTION choice — critical for far-distance room shots.
+    # RetinaFace (uniface) detects small/distant faces that MediaPipe's
+    # landmarker (built for near webcam faces) misses entirely.
+    face_box_provider = None
+    if detector == "retinaface":
+        detectors = importlib.import_module(
+            "attention_room.modalities.gaze.detectors")
+        face_box_provider = detectors.UnifaceFaceBoxProvider(
+            max_faces=max_faces, det_width=det_width,
+            min_confidence=min_conf)
+        log.info("face detector: RetinaFace (uniface), det_width=%d, "
+                 "min_conf=%.2f", det_width, min_conf)
+    else:
+        log.info("face detector: MediaPipe landmarker (near-face only)")
+
+    return onnx.OnnxGazeEstimator(
+        model, cfg, max_faces=max_faces,
+        face_box_provider=face_box_provider,
+        detector_model=(detector_model if face_box_provider is None
+                        else None))
 
 
 def result_to_event(r, classify, cfg, ts: float) -> AttentionEvent:
@@ -124,7 +154,20 @@ def main() -> None:
     ap.add_argument("--estimator", choices=["mediapipe", "onnx"],
                     default="onnx")
     ap.add_argument("--model", required=True,
-                    help="estimator model file (same as run_gaze_node.py)")
+                    help="gaze ONNX model file (same as run_gaze_node.py)")
+    ap.add_argument("--detector", choices=["retinaface", "mediapipe"],
+                    default="retinaface",
+                    help="face detector. retinaface (uniface) for "
+                         "far/distant faces; mediapipe for near webcam faces")
+    ap.add_argument("--detector-model",
+                    help="face_landmarker.task — only needed for "
+                         "--detector mediapipe")
+    ap.add_argument("--det-width", type=int, default=960,
+                    help="RetinaFace detection width; raise to 1280/1600 for "
+                         "smaller/more distant faces (slower)")
+    ap.add_argument("--min-conf", type=float, default=0.5,
+                    help="face detection confidence floor; lower (0.3) to "
+                         "catch faint distant faces")
     ap.add_argument("--max-faces", type=int, default=6)
     ap.add_argument("--fps", type=float, default=5.0)
     ap.add_argument("--t0", type=float, default=1000.0,
@@ -136,7 +179,11 @@ def main() -> None:
 
     classify, cfg = load_attention_room(Path(args.ar_path))
     estimator = build_estimator(Path(args.ar_path), args.estimator,
-                                args.model, cfg, args.max_faces)
+                                args.model, cfg, args.max_faces,
+                                detector=args.detector,
+                                det_width=args.det_width,
+                                min_conf=args.min_conf,
+                                detector_model=args.detector_model)
     events = ingest_room_with_estimator(Path(args.room), estimator,
                                         classify, cfg, args.t0, args.fps)
     if not events:
