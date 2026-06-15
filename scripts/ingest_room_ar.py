@@ -30,16 +30,48 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aura.events import AttentionEvent, SessionEnd   # noqa: E402
 
+log = logging.getLogger("aura.ingest_room_ar")
+
 SCREEN_TARGETS = {"screen", "own_screen", "presenter", "front",
                   "shared_screen", "board"}
-AWAY_SCORE = 0.15        # attention when gaze target is not the screen
+AWAY_SCORE = 0.15        # legacy flat away-score (strict mode only)
+
+
+@dataclass
+class GazeCal:
+    """Calibration for turning head pose into a *graded* attention score.
+
+    The room camera usually is NOT co-located with the screen, so faces that
+    are genuinely looking at the screen still read off-axis. The classifier's
+    narrow `own_screen` cone then misses them and everyone collapses to the
+    flat AWAY_SCORE (the "stuck at 15%" symptom). Grading attention smoothly
+    from how far the gaze is off a configurable centre fixes that: engagement
+    now varies as people turn their heads, and `--yaw-center`/`--pitch-center`
+    let you compensate for the camera angle.
+    """
+    yaw_center: float = 0.0      # head yaw (deg) when looking AT the screen
+    pitch_center: float = 0.0    # head pitch (deg) when looking AT the screen
+    yaw_cone: float = 35.0       # deg off-centre at which attention hits ~0
+    pitch_cone: float = 28.0
+    away_floor: float = 0.05     # floor for fully off-axis faces
+    strict: bool = False         # True -> original binary screen/AWAY_SCORE
+
+
+def _graded_attention(yaw: float, pitch: float, cal: GazeCal) -> float:
+    """1.0 looking straight at the (calibrated) screen centre, decaying to 0
+    at the cone edges — same falloff shape AURA's native tracker uses."""
+    y = max(0.0, 1.0 - abs(yaw - cal.yaw_center) / max(cal.yaw_cone, 1e-6))
+    p = max(0.0, 1.0 - abs(pitch - cal.pitch_center) / max(cal.pitch_cone, 1e-6))
+    return y * p
 
 
 def _is_attending(target: str) -> bool:
@@ -114,23 +146,39 @@ def _cpu_accelerator(ar_path: Path):
         return None
 
 
-def result_to_event(r, classify, cfg, ts: float) -> AttentionEvent:
-    """GazeResult -> AURA AttentionEvent via the user's own target logic."""
-    target, conf = classify(getattr(r, "yaw", 0.0), getattr(r, "pitch", 0.0),
-                            getattr(r, "blink", 0.0), cfg)
-    attention = float(conf) if _is_attending(target) else AWAY_SCORE
+def result_to_event(r, classify, cfg, ts: float, cal: GazeCal | None = None
+                    ) -> AttentionEvent:
+    """GazeResult -> AURA AttentionEvent.
+
+    cal is None  -> original strict behaviour (own_screen -> conf, else 0.15).
+                    Kept as the default so existing unit tests are unchanged.
+    cal provided -> graded: screen-lookers keep the classifier confidence, but
+                    everyone else decays smoothly with gaze angle instead of
+                    snapping to a flat 0.15. This is what the ingest CLI uses,
+                    so the room engagement actually moves.
+    """
+    yaw = getattr(r, "yaw", 0.0)
+    pitch = getattr(r, "pitch", 0.0)
+    target, conf = classify(yaw, pitch, getattr(r, "blink", 0.0), cfg)
+    if cal is None or cal.strict:
+        attention = float(conf) if _is_attending(target) else AWAY_SCORE
+    else:
+        graded = _graded_attention(yaw, pitch, cal)
+        attention = (max(float(conf), graded) if _is_attending(target)
+                     else max(graded, cal.away_floor))
     pid = (f"person_{r.track_id}" if getattr(r, "track_id", None) is not None
            else f"person_{getattr(r, 'face_index', 0)}")
     e = AttentionEvent(person_id=pid, attention=round(attention, 3),
-                       yaw=round(getattr(r, "yaw", 0.0), 1),
-                       pitch=round(getattr(r, "pitch", 0.0), 1),
+                       yaw=round(yaw, 1),
+                       pitch=round(pitch, 1),
                        source="attention_room")
     e.ts = ts
     return e
 
 
 def ingest_room_with_estimator(video: Path, estimator, classify, cfg,
-                               t0: float, sample_fps: float = 5.0
+                               t0: float, sample_fps: float = 5.0,
+                               cal: GazeCal | None = None
                                ) -> list[dict]:
     import cv2
     cap = cv2.VideoCapture(str(video))
@@ -143,6 +191,7 @@ def ingest_room_with_estimator(video: Path, estimator, classify, cfg,
           f"minutes; progress every 25 frames...", flush=True)
     import time as _t
     events, idx, done, t_start = [], 0, 0, _t.time()
+    target_hist: dict[str, int] = {}
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -152,8 +201,13 @@ def ingest_room_with_estimator(video: Path, estimator, classify, cfg,
             media_t = idx / src_fps
             faces_here = 0
             for r in estimator.estimate(rgb, int(media_t * 1000)):
-                e = result_to_event(r, classify, cfg, t0 + media_t)
+                e = result_to_event(r, classify, cfg, t0 + media_t, cal)
                 events.append({"topic": e.topic, **e.model_dump()})
+                # tally raw gaze target (cheap, pure-arithmetic) for diagnostics
+                tgt, _ = classify(getattr(r, "yaw", 0.0),
+                                  getattr(r, "pitch", 0.0),
+                                  getattr(r, "blink", 0.0), cfg)
+                target_hist[tgt] = target_hist.get(tgt, 0) + 1
                 faces_here += 1
             done += 1
             if done % 25 == 0:
@@ -168,6 +222,21 @@ def ingest_room_with_estimator(video: Path, estimator, classify, cfg,
     people = {e["person_id"] for e in events}
     print(f"attention_room adapter: {len(events)} attention events, "
           f"{len(people)} tracklet(s): {sorted(people)[:8]}")
+    if events:
+        scores = [e["attention"] for e in events]
+        mean = sum(scores) / len(scores)
+        attending = sum(1 for s in scores if s >= 0.4) / len(scores)
+        hist = ", ".join(f"{k}={v}" for k, v in
+                         sorted(target_hist.items(), key=lambda kv: -kv[1]))
+        print(f"  gaze targets: {hist}")
+        print(f"  attention: mean={mean:.2f}, "
+              f"{attending*100:.0f}% of frames >=0.40")
+        if mean <= AWAY_SCORE + 0.02:
+            print("  ⚠ attention is flat/low — the camera angle likely shifts "
+                  "head pose off the screen cone. Re-run with --yaw-center / "
+                  "--pitch-center set to the pose people show when looking at "
+                  "the screen (read the dominant 'left'/'right'/'up_away' bias "
+                  "above), and/or widen --yaw-cone / --pitch-cone.")
     return events
 
 
@@ -215,10 +284,33 @@ def main() -> None:
     ap.add_argument("--fps", type=float, default=5.0)
     ap.add_argument("--t0", type=float, default=1000.0,
                     help="room stream t0 (see manifest.json)")
+    # --- gaze calibration (fixes the "engagement stuck at 15%" symptom) ------
+    ap.add_argument("--yaw-center", type=float, default=0.0,
+                    help="head yaw (deg) people show when looking AT the "
+                         "screen; set to the dominant left/right bias if the "
+                         "camera is off to one side")
+    ap.add_argument("--pitch-center", type=float, default=0.0,
+                    help="head pitch (deg) when looking at the screen (e.g. a "
+                         "high camera makes attentive faces read pitched-down)")
+    ap.add_argument("--yaw-cone", type=float, default=35.0,
+                    help="deg off-centre at which attention decays to 0 "
+                         "(widen for a wide-angle room shot)")
+    ap.add_argument("--pitch-cone", type=float, default=28.0)
+    ap.add_argument("--away-floor", type=float, default=0.05,
+                    help="attention floor for fully off-axis faces")
+    ap.add_argument("--strict-screen", action="store_true",
+                    help="disable graded scoring; restore the original binary "
+                         "own_screen->conf / else->0.15 behaviour")
     ap.add_argument("--merge-into",
                     help="existing events.jsonl to merge into")
     ap.add_argument("--out", default="room_events.jsonl")
     args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    cal = GazeCal(yaw_center=args.yaw_center, pitch_center=args.pitch_center,
+                  yaw_cone=args.yaw_cone, pitch_cone=args.pitch_cone,
+                  away_floor=args.away_floor, strict=args.strict_screen)
 
     classify, cfg = load_attention_room(Path(args.ar_path))
     estimator = build_estimator(Path(args.ar_path), args.estimator,
@@ -228,7 +320,8 @@ def main() -> None:
                                 min_conf=args.min_conf,
                                 detector_model=args.detector_model)
     events = ingest_room_with_estimator(Path(args.room), estimator,
-                                        classify, cfg, args.t0, args.fps)
+                                        classify, cfg, args.t0, args.fps,
+                                        cal=cal)
     if not events:
         sys.exit("no faces found — check the model path and run "
                  "scripts/diagnose.py --room to see face sizes")

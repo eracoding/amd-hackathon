@@ -131,10 +131,16 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 const $=id=>document.getElementById(id);
 const META=__META__;          // injected: {hasRoom,hasScreen,t0,speed}
 const T0=META.t0, SPEED=META.speed||1;
+// Absolute base path so resources resolve under a Jupyter/notebook proxy that
+// serves this page at /proxy/<port> WITHOUT a trailing slash. A *relative*
+// "video/room" would otherwise resolve against /proxy/ and become
+// /proxy/video/room (dropping the port segment) -> 404 -> "video failed to
+// load". The WebSocket below already does this; the <video> tags must too.
+const BASE=(location.pathname.endsWith('/')?location.pathname.slice(0,-1):location.pathname);
 const roomV=$('roomvid'), screenV=$('screenvid');
 function initVid(v, name, hasIt, novidId){
   if(!hasIt){ v.style.display='none'; $(novidId).style.display='block'; return; }
-  v.src='video/'+name+'?t='+Date.now();   // cache-bust
+  v.src=BASE+'/video/'+name+'?t='+Date.now();   // absolute (proxy-safe) + cache-bust
   v.preload='auto'; v.muted=true; v.playsInline=true;
   v.addEventListener('error', ()=>{
     v.style.display='none'; $(novidId).textContent='video failed to load';
@@ -174,7 +180,7 @@ function syncVideos(elapsed){
 }
 
 const ws=new WebSocket((location.protocol=='https:'?'wss':'ws')+'://'+location.host+
-  (location.pathname.endsWith('/')?location.pathname.slice(0,-1):location.pathname)+'/ws');
+  BASE+'/ws');
 
 ws.onmessage=e=>{
  const m=JSON.parse(e.data);
