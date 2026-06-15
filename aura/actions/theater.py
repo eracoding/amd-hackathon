@@ -132,18 +132,44 @@ const $=id=>document.getElementById(id);
 const META=__META__;          // injected: {hasRoom,hasScreen,t0,speed}
 const T0=META.t0, SPEED=META.speed||1;
 const roomV=$('roomvid'), screenV=$('screenvid');
-if(META.hasRoom){roomV.src='video/room';} else {roomV.style.display='none';$('roomnovid').style.display='block';}
-if(META.hasScreen){screenV.src='video/screen';} else {screenV.style.display='none';$('screennovid').style.display='block';}
+function initVid(v, name, hasIt, novidId){
+  if(!hasIt){ v.style.display='none'; $(novidId).style.display='block'; return; }
+  v.src='video/'+name+'?t='+Date.now();   // cache-bust
+  v.preload='auto'; v.muted=true; v.playsInline=true;
+  v.addEventListener('error', ()=>{
+    v.style.display='none'; $(novidId).textContent='video failed to load';
+    $(novidId).style.display='block';
+  });
+  v.addEventListener('loadeddata', ()=>{ v.play().catch(()=>{}); });
+  v.load();
+}
+initVid(roomV,'room',META.hasRoom,'roomnovid');
+initVid(screenV,'screen',META.hasScreen,'screennovid');
+
+// one user gesture unblocks autoplay+seeking on strict proxies/browsers
+let kicked=false;
+function kickstart(){ if(kicked) return; kicked=true;
+  for(const v of [roomV,screenV]){ if(v.src){ v.play().catch(()=>{}); } }
+}
+document.addEventListener('click', kickstart, {once:true});
+document.body.insertAdjacentHTML('afterbegin',
+  '<div id="playhint" style="position:fixed;top:50%;left:50%;'+
+  'transform:translate(-50%,-50%);z-index:99;background:rgba(20,27,37,.95);'+
+  'border:1px solid #5B8DD9;color:#E8EDF4;padding:14px 22px;border-radius:10px;'+
+  'font:600 14px system-ui;cursor:pointer">▶ Click anywhere to start the video streams</div>');
+document.addEventListener('click', ()=>{const h=$('playhint'); if(h) h.remove();}, {once:true});
 
 let sessionStart=null, feedEmpty=true, micEmpty=true;
 const segs=[];
 
 function syncVideos(elapsed){
   for(const v of [roomV, screenV]){
-    if(!v.src||v.readyState<1) continue;
-    const target=Math.min(elapsed, (v.duration||1e9)-0.1);
-    if(Math.abs(v.currentTime-target)>0.6){ try{v.currentTime=target}catch(e){} }
-    if(v.paused) v.play().catch(()=>{});
+    if(!v.src||v.readyState<2) continue;
+    const dur=v.duration||1e9, target=Math.min(elapsed, dur-0.1);
+    // only hard-seek on large drift; small drift self-corrects via playback,
+    // so a proxy that refuses range seeks still plays (just may lag slightly)
+    if(Math.abs(v.currentTime-target)>1.5){ try{v.currentTime=target}catch(e){} }
+    if(v.paused && kicked) v.play().catch(()=>{});
   }
 }
 
@@ -335,7 +361,17 @@ class TheaterMonitor:
         path = self._video(name)
         if path is None:
             return web.Response(status=404, text="no video")
-        return web.FileResponse(path)   # supports range requests for seeking
+        ctype = {".mp4": "video/mp4", ".webm": "video/webm",
+                 ".mov": "video/quicktime", ".mkv": "video/x-matroska"
+                 }.get(path.suffix.lower(), "video/mp4")
+        # FileResponse honors Range requests (needed for seeking); set an
+        # explicit content-type and accept-ranges so proxies/browsers comply.
+        resp = web.FileResponse(path, headers={
+            "Content-Type": ctype,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+        })
+        return resp
 
     async def _ws(self, req: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
